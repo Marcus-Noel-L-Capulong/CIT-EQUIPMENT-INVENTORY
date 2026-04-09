@@ -2,12 +2,12 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const path = require('path');
-const http = require('http'); // NEW: Required for WebSockets
-const { Server } = require('socket.io'); // NEW: Import Socket.io
+const http = require('http'); // Required for WebSockets
+const { Server } = require('socket.io'); // Import Socket.io
 
 const app = express();
-const server = http.createServer(app); // NEW: Wrap Express with HTTP
-const io = new Server(server, { cors: { origin: '*' } }); // NEW: Initialize Socket.io
+const server = http.createServer(app); // Wrap Express with HTTP
+const io = new Server(server, { cors: { origin: '*' } }); // Initialize Socket.io
 
 // --- MIDDLEWARE ---
 app.use(cors());
@@ -15,11 +15,13 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname))); 
 
 // --- DATABASE CONNECTION ---
-const dbURI = 'mongodb://127.0.0.1:27017/cit_vault';
+// ⚠️ IMPORTANT: Replace <db_password> with your actual database password!
+// Make sure to remove the < > brackets as well.
+const dbURI = 'mongodb+srv://admin:1234@citinventory.ijwwkh8.mongodb.net/cit_vault?appName=CITINVENTORY';
 
 mongoose.connect(dbURI)
-    .then(() => console.log('✅ Local MongoDB Connected'))
-    .catch(err => console.log('❌ Local MongoDB Connection Error:', err));
+    .then(() => console.log('✅ Cloud MongoDB Connected Successfully'))
+    .catch(err => console.log('❌ Cloud MongoDB Connection Error:', err));
 
 // --- WEBSOCKET CONNECTION ---
 io.on('connection', (socket) => {
@@ -91,7 +93,4 @@ app.get('*', (req, res) => {
 
 // --- PORT ---
 const PORT = process.env.PORT || 5000;
-// CRITICAL: We now listen on 'server', not 'app'
 server.listen(PORT, () => console.log(`🚀 Live Server on port ${PORT}`));
-
-module.exports = app;
