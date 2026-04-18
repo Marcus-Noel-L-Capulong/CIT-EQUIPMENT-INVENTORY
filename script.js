@@ -45,8 +45,24 @@ async function initApp() {
 
         startLiveCountdown();
 
+        // Websocket connection for live updates
+        if (typeof io !== 'undefined') {
+            const socket = io();
+            socket.on('vault_update', async () => {
+                const updatedItemsRes = await fetch(`${API_URL}/items`);
+                vaultData = await updatedItemsRes.json();
+                
+                const updatedLogsRes = await fetch(`${API_URL}/logs`);
+                auditLogs = await updatedLogsRes.json();
+                
+                applyFilters();
+                if(sessionStorage.getItem('activeRole') === 'admin') updateLogsView();
+                if(sessionStorage.getItem('activeRole') === 'student') updateStudentHistory();
+            });
+        }
+
     } catch (error) {
-        console.error("⚠️ Make sure your Node backend is running!", error);
+        console.error("Make sure your Node backend is running!", error);
     }
 }
 
@@ -140,17 +156,79 @@ function startLockoutTimer() {
     }, 1000);
 }
 
-function checkStudentLogin() {
-    const n = document.getElementById('student-name').value.trim();
-    const sid = document.getElementById('student-id').value.trim();
-    if (n && sid) {
-        sessionStorage.setItem('activeRole', 'student');
-        sessionStorage.setItem('studentName', n);
-        sessionStorage.setItem('studentId', sid);
+// NEW: Student Registration & Login Functions
+function toggleStudentAuthMode(mode) {
+    if (mode === 'register') {
+        document.getElementById('student-login-form').classList.add('hidden');
+        document.getElementById('student-register-form').classList.remove('hidden');
+        document.getElementById('student-auth-title').innerText = "Student Registration";
+    } else {
+        document.getElementById('student-register-form').classList.add('hidden');
+        document.getElementById('student-login-form').classList.remove('hidden');
+        document.getElementById('student-auth-title').innerText = "Student Login";
+    }
+}
+
+async function registerStudent() {
+    const name = document.getElementById('reg-student-name').value.trim();
+    const sid = document.getElementById('reg-student-id').value.trim();
+    const pass = document.getElementById('reg-student-pass').value;
+
+    if (!name || !sid || !pass) return alert("Please fill in all registration fields.");
+
+    try {
+        const res = await fetch(`${API_URL}/students/register`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, studentId: sid, password: pass })
+        });
+        const data = await res.json();
         
-        addLog(`Student Login: ${n} (ID: ${sid})`, "SUCCESS", n);
-        setupUI('student', { name: n, id: sid });
-    } else { alert("Please enter both Name and Student ID."); }
+        if (!res.ok) return alert(data.error || "Registration failed.");
+        
+        alert("Account created successfully! You may now log in.");
+        
+        toggleStudentAuthMode('login');
+        document.getElementById('login-student-id').value = sid;
+        document.getElementById('login-student-pass').value = '';
+        
+        addLog(`New Student Registered: ${name} (${sid})`, "SUCCESS", "System");
+    } catch (err) {
+        console.error(err);
+        alert("Server error during registration.");
+    }
+}
+
+async function checkStudentLogin() {
+    const sid = document.getElementById('login-student-id').value.trim();
+    const pass = document.getElementById('login-student-pass').value;
+
+    if (!sid || !pass) return alert("Please enter your Student ID and Password.");
+
+    try {
+        const res = await fetch(`${API_URL}/students/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ studentId: sid, password: pass })
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+            addLog(`Failed Student Login Attempt (ID: ${sid})`, "SECURITY ALERT", "System");
+            return alert(data.error || "Invalid credentials.");
+        }
+
+        sessionStorage.setItem('activeRole', 'student');
+        sessionStorage.setItem('studentName', data.name);
+        sessionStorage.setItem('studentId', data.studentId);
+        
+        addLog(`Student Login: ${data.name} (ID: ${data.studentId})`, "SUCCESS", data.name);
+        setupUI('student', { name: data.name, id: data.studentId });
+
+    } catch (err) {
+        console.error(err);
+        alert("Server error during login.");
+    }
 }
 
 // --- UI DASHBOARD SETUP ---
@@ -194,25 +272,18 @@ function showSecurityAlert(msg) {
 }
 
 function switchNav(view) {
-    document.getElementById('nav-home').classList.remove('active');
-    document.getElementById('nav-maintenance').classList.remove('active');
-    document.getElementById('nav-charts').classList.remove('active');
-    if(document.getElementById('nav-requests')) document.getElementById('nav-requests').classList.remove('active');
-    if(document.getElementById('nav-logs')) document.getElementById('nav-logs').classList.remove('active');
+    ['home', 'maintenance', 'charts', 'requests', 'logs', 'returns'].forEach(v => {
+        if(document.getElementById(`nav-${v}`)) document.getElementById(`nav-${v}`).classList.remove('active');
+        if(document.getElementById(`view-${v}`)) document.getElementById(`view-${v}`).classList.add('hidden');
+    });
     
     if(document.getElementById(`nav-${view}`)) document.getElementById(`nav-${view}`).classList.add('active');
-
-    document.getElementById('view-home').classList.add('hidden');
-    document.getElementById('view-maintenance').classList.add('hidden');
-    document.getElementById('view-charts').classList.add('hidden');
-    document.getElementById('view-requests').classList.add('hidden');
-    if(document.getElementById('view-logs')) document.getElementById('view-logs').classList.add('hidden');
-    
-    document.getElementById(`view-${view}`).classList.remove('hidden');
+    if(document.getElementById(`view-${view}`)) document.getElementById(`view-${view}`).classList.remove('hidden');
 
     if (view === 'charts') updateChart();
     if (view === 'requests') renderRequestsView();
     if (view === 'logs') updateLogsView();
+    if (view === 'returns') renderReturnsView();
 }
 
 // --- 3DES ENGINE ---
@@ -265,16 +336,6 @@ async function apply3DESWithVisuals(text) {
     if (step3) step3.classList.remove('active');
     
     return finalCipher;
-}
-
-function decrypt3DES(enc) {
-    try {
-        let raw = atob(enc.replace("3DES-", ""));
-        let st1 = runFeistel16(raw, SYSTEM_KEY);
-        let st2 = runFeistel16(st1, SYSTEM_KEY.split('').reverse().join(''));
-        let st3 = runFeistel16(st2, SYSTEM_KEY);
-        return st3.trim();
-    } catch (e) { return "Error"; }
 }
 
 // --- LOGGING & HISTORY ---
@@ -331,7 +392,7 @@ function updateLogsView() {
         }
 
         let matchType = true;
-        if (typeQuery === 'Login') matchType = log.action.toLowerCase().includes('login');
+        if (typeQuery === 'Login') matchType = log.action.toLowerCase().includes('login') || log.action.toLowerCase().includes('register');
         if (typeQuery === 'Borrow') matchType = log.action.toLowerCase().includes('request') || log.action.toLowerCase().includes('approv') || log.action.toLowerCase().includes('return');
         if (typeQuery === 'System') matchType = log.status === 'DELETED' || log.action.toLowerCase().includes('password') || log.action.toLowerCase().includes('registered');
 
@@ -389,7 +450,7 @@ function updateLogsView() {
         if (log.status === 'SECURITY ALERT' || log.status === 'DELETED' || act.includes('failed') || act.includes('reject')) {
             badgeColor = '#ef4444'; 
             badgeText = 'Critical';
-        } else if (log.status === 'PENDING' || act.includes('password') || act.includes('updated') || act.includes('request')) {
+        } else if (log.status === 'PENDING' || act.includes('password') || act.includes('updated') || act.includes('request') || act.includes('return verification')) {
             badgeColor = '#f59e0b'; 
             badgeText = 'Warning / Auth';
         }
@@ -409,7 +470,6 @@ function updateLogsView() {
         </tr>`;
     }).join('');
 }
-
 
 function updateStudentHistory() {
     const list = document.getElementById('student-history-list');
@@ -507,7 +567,6 @@ function startLiveCountdown() {
     }, 1000);
 }
 
-
 // --- SMART CART (STUDENT) ---
 function updateCartBadge() {
     let totalItems = shoppingCart.reduce((sum, i) => sum + i.reqQty, 0);
@@ -533,7 +592,7 @@ function addToCart(id) {
     } else {
         shoppingCart.push({ id: id, equipment: item.equipment, category: item.category || 'Others', maxQty: stock, reqQty: 1 });
         updateCartBadge();
-        alert(`Added ${item.equipment} to your Equipment Bag 🛒`);
+        alert(`Added ${item.equipment} to your Equipment Bag`);
     }
 }
 
@@ -664,15 +723,16 @@ function renderRequestsView() {
         let group = groupedRequests[tx];
         
         let itemRows = group.items.map(i => {
+            // ENFORCED EQUAL HEIGHT IN REQUEST TABLE BUTTONS
             return `<tr style="border-bottom: 1px solid var(--border);">
                 <td style="padding: 12px 8px;"><strong>${i.equipment}</strong> <span style="color:#64748b; font-size:0.8rem;">(${i.category})</span></td>
                 <td style="padding: 12px 8px; text-align:center; width: 150px;">
                     <span style="font-weight:bold; color:var(--cit-blue); background:#e2e8f0; padding:6px 16px; border-radius:20px;">${i.serials.length}</span>
                 </td>
                 <td style="padding: 12px 8px; text-align:center; width: 220px;">
-                    <div style="display: flex; justify-content: center; gap: 8px;">
-                        <button onclick="approveSingleItem('${i._id}')" style="flex: 1; background:#10b981; color:white; border:none; padding:8px 0; border-radius:6px; cursor:pointer; font-size:0.75rem; font-weight:bold; transition:0.2s;">Approve</button>
-                        <button onclick="rejectSingleItem('${i._id}')" style="flex: 1; background:#ef4444; color:white; border:none; padding:8px 0; border-radius:6px; cursor:pointer; font-size:0.75rem; font-weight:bold; transition:0.2s;">Reject</button>
+                    <div style="display: flex; gap: 8px; justify-content: center; height: 38px;">
+                        <button onclick="approveSingleItem('${i._id}')" class="btn-primary" style="flex:1; height: 100%; background:#10b981; padding:0; font-size:0.8rem; border-radius:6px; border:none; color:white; font-weight:bold; cursor:pointer; transition:0.2s; box-sizing: border-box;">Approve</button>
+                        <button onclick="rejectSingleItem('${i._id}')" class="btn-danger" style="flex:1; height: 100%; background:#ef4444; padding:0; font-size:0.8rem; border-radius:6px; border:none; color:white; font-weight:bold; cursor:pointer; transition:0.2s; box-sizing: border-box;">Reject</button>
                     </div>
                 </td>
             </tr>`;
@@ -705,6 +765,31 @@ function renderRequestsView() {
         </div>`;
     }
     container.innerHTML = html;
+}
+
+// --- NEW ADMIN: PENDING RETURNS VIEW ---
+function renderReturnsView() {
+    const list = document.getElementById('returns-list');
+    const pendingReturns = vaultData.filter(i => i.status === 'Pending Return');
+
+    if (pendingReturns.length === 0) {
+        list.innerHTML = `<tr><td colspan="4" style="text-align:center; padding: 30px; color:#64748b;">No pending returns to verify.</td></tr>`;
+        return;
+    }
+
+    list.innerHTML = pendingReturns.map(item => `
+        <tr style="border-bottom: 1px solid var(--border);">
+            <td style="padding: 12px 10px;"><strong>${item.borrower}</strong></td>
+            <td style="padding: 12px 10px;"><strong>${item.equipment}</strong><br><small style="color:#64748b;">SN: ${item.serials.length > 0 ? item.serials[0].substring(0,10)+'...' : 'N/A'}</small></td>
+            <td style="padding: 12px 10px;"><span style="font-family:monospace; color:#64748b;">${item.transactionId || 'N/A'}</span></td>
+            <td style="padding: 12px 10px; text-align:center; width: 220px;">
+                <div style="display: flex; gap: 8px; justify-content: center; height: 38px;">
+                    <button onclick="confirmReturn('${item._id}')" class="btn-primary" style="flex:1; height: 100%; background:#10b981; padding:0; font-size:0.8rem; border-radius:6px; border:none; color:white; font-weight:bold; cursor:pointer; box-sizing: border-box;">Verify</button>
+                    <button onclick="rejectReturn('${item._id}')" class="btn-danger" style="flex:1; height: 100%; background:#ef4444; padding:0; font-size:0.8rem; border-radius:6px; border:none; color:white; font-weight:bold; cursor:pointer; box-sizing: border-box;">Reject</button>
+                </div>
+            </td>
+        </tr>
+    `).join('');
 }
 
 // --- GLOBAL BATCH APPROVE/REJECT ---
@@ -861,6 +946,7 @@ function applyFilters() {
     
     if(!document.getElementById('view-charts').classList.contains('hidden')) updateChart(); 
     if(!document.getElementById('view-requests').classList.contains('hidden')) renderRequestsView();
+    if(!document.getElementById('view-returns').classList.contains('hidden')) renderReturnsView();
     if(!document.getElementById('view-logs').classList.contains('hidden')) updateLogsView();
 }
 
@@ -1047,7 +1133,7 @@ function updateTable(dataToDisplay, role = sessionStorage.getItem('activeRole'),
 
         let badgeClass = 'badge-available';
         if (item.status === 'Borrowed') badgeClass = 'badge-borrowed';
-        if (item.status === 'Pending Approval') badgeClass = 'badge-pending';
+        if (item.status === 'Pending Approval' || item.status === 'Pending Return') badgeClass = 'badge-pending';
         
         let penaltyText = "";
         if (item.status === 'Borrowed' && item.returnDate) {
@@ -1069,7 +1155,7 @@ function updateTable(dataToDisplay, role = sessionStorage.getItem('activeRole'),
             } else if (item.serials.length === 1) {
                 let displaySerial = item.serials[0];
                 let shortSerial = displaySerial.length > 15 ? displaySerial.substring(0, 15) + '...' : displaySerial;
-                serialsHtml = `<td style="cursor:pointer; font-family:monospace; color:#3b82f6;" title="Click to Decrypt" onclick="unlockItem('${item._id}', 0)">${shortSerial}</td>`;
+                serialsHtml = `<td style="cursor:pointer; font-family:monospace; color:#3b82f6;" title="Click to Manually Decrypt" onclick="unlockItem('${item._id}', 0)">${shortSerial}</td>`;
             } else {
                 let options = item.serials.map((s, idx) => {
                     let shortS = s.length > 15 ? s.substring(0, 15) + '...' : s;
@@ -1084,11 +1170,13 @@ function updateTable(dataToDisplay, role = sessionStorage.getItem('activeRole'),
             let actionHtml = '';
             if (item.status === 'Pending Approval') {
                 actionHtml = `<span style="font-size:0.8rem; color:#64748b;">Check Requests Tab</span>`;
+            } else if (item.status === 'Pending Return') {
+                actionHtml = `<span style="font-size:0.8rem; color:#f59e0b; font-weight:bold;">Check Returns Tab</span>`;
             } else if (item.status === 'Available') {
-                actionHtml = `<button onclick="removeItem('${item._id}')" class="btn-primary" style="padding: 8px 15px; font-size: 0.85rem; width: 100%; margin-bottom: 5px;">Delete</button><br>
-                              <button onclick="openReportModal('${item._id}')" class="btn-danger" style="padding: 8px 15px; font-size: 0.85rem; width: 100%;">Report Issue</button>`;
+                actionHtml = `<button onclick="removeItem('${item._id}')" class="btn-primary" style="padding: 10px; font-size: 0.85rem; width: 100%; margin-bottom: 8px; font-weight:bold;">Delete</button><br>
+                              <button onclick="openReportModal('${item._id}')" class="btn-danger" style="padding: 10px; font-size: 0.85rem; width: 100%; border:none; font-weight:bold;">Report Issue</button>`;
             } else {
-                actionHtml = `<button onclick="removeItem('${item._id}')" class="btn-primary" style="padding: 8px 15px; font-size: 0.85rem; width: 100%;">Delete Group</button>`;
+                actionHtml = `<button onclick="removeItem('${item._id}')" class="btn-primary" style="padding: 10px; font-size: 0.85rem; width: 100%; font-weight:bold;">Delete Group</button>`;
             }
             
             row += `${catHtml}${descHtml}${qtyHtml}${serialsHtml}
@@ -1096,12 +1184,14 @@ function updateTable(dataToDisplay, role = sessionStorage.getItem('activeRole'),
         } else {
             let btn = '';
             if (item.status === 'Available') {
-                btn = `<button onclick="addToCart('${item._id}')" class="btn-primary" style="padding: 8px 15px; font-size: 0.85rem; width: 100%; margin-bottom: 5px;">Add to Bag</button><br>
-                       <button onclick="openReportModal('${item._id}')" class="btn-danger" style="padding: 8px 15px; font-size: 0.85rem; width: 100%;">Report Issue</button>`;
+                btn = `<button onclick="addToCart('${item._id}')" class="btn-primary" style="padding: 10px; font-size: 0.85rem; width: 100%; margin-bottom: 8px; font-weight:bold;">Add to Bag</button><br>
+                       <button onclick="openReportModal('${item._id}')" class="btn-danger" style="padding: 10px; font-size: 0.85rem; width: 100%; border:none; font-weight:bold;">Report Issue</button>`;
             } else if (item.status === 'Pending Approval' && item.borrower === studentData.name) {
                 btn = `<span style="font-size: 0.8rem; color: #6366f1; font-weight: bold;">Waiting...</span>`;
+            } else if (item.status === 'Pending Return' && item.borrower === studentData.name) {
+                btn = `<span style="font-size: 0.8rem; color: #f59e0b; font-weight: bold;">Verifying Return...</span>`;
             } else if (item.status === 'Borrowed' && item.borrower === studentData.name) {
-                btn = `<button onclick="returnItem('${item._id}')" class="btn-secondary" style="padding: 8px 15px; font-size: 0.85rem; width: 100%;">Return</button>`;
+                btn = `<button onclick="returnItem('${item._id}')" class="btn-secondary" style="padding: 10px; font-size: 0.85rem; width: 100%; font-weight:bold;">Return</button>`;
             } else {
                 btn = `<span style="font-size: 0.8rem; color: #64748b;">Unavailable</span>`;
             }
@@ -1178,7 +1268,6 @@ function updateMaintenanceTable() {
         list.innerHTML += row;
     });
 }
-
 
 // --- DATABASE ACTIONS ---
 async function addNewItem() {
@@ -1354,23 +1443,73 @@ async function markAsFixed(id) {
     applyFilters();
 }
 
-// --- UTILS & RETURNS ---
+// --- NEW MANUAL DECRYPTION FLOW ---
+let pendingDecryptSerial = "";
+let pendingDecryptItemName = "";
+
 function unlockItem(id, index = 0) {
     const item = vaultData.find(i => i._id === id);
-    const decryptedSerial = decrypt3DES(item.serials[index]);
-    addLog(`Decrypted ${item.equipment}`, "SUCCESS", "Admin");
-    alert(`🔓 Original Serial: ${decryptedSerial}`);
+    pendingDecryptSerial = item.serials[index];
+    pendingDecryptItemName = item.equipment;
+    openManualDecryptModal();
 }
 
 function unlockSelectedSerial(id) {
     const item = vaultData.find(i => i._id === id);
     const selectEl = document.getElementById(`serial-select-${id}`);
     const selectedIndex = selectEl.value;
-    const decryptedSerial = decrypt3DES(item.serials[selectedIndex]);
-    addLog(`Decrypted ${item.equipment} (Serial #${parseInt(selectedIndex) + 1})`, "SUCCESS", "Admin");
-    alert(`🔓 Original Serial: ${decryptedSerial}`);
+    pendingDecryptSerial = item.serials[selectedIndex];
+    pendingDecryptItemName = item.equipment;
+    openManualDecryptModal();
 }
 
+function openManualDecryptModal() {
+    document.getElementById('manual-decrypt-key').value = "";
+    document.getElementById('decrypt-viz').classList.add('hidden');
+    document.getElementById('d-step-1').style.color = '#64748b';
+    document.getElementById('d-step-2').style.color = '#64748b';
+    document.getElementById('d-step-3').style.color = '#64748b';
+    document.getElementById('d-result').innerText = "";
+    document.getElementById('manual-decrypt-modal').classList.remove('hidden');
+}
+
+function closeManualDecryptModal() {
+    document.getElementById('manual-decrypt-modal').classList.add('hidden');
+}
+
+async function executeManualDecrypt() {
+    const keyInput = document.getElementById('manual-decrypt-key').value;
+    
+    if (keyInput !== SYSTEM_KEY) {
+        alert("Decryption Failed: Invalid Master Key.");
+        addLog(`Failed Decryption Attempt: ${pendingDecryptItemName}`, "SECURITY ALERT", "Admin");
+        return;
+    }
+
+    const viz = document.getElementById('decrypt-viz');
+    viz.classList.remove('hidden');
+    
+    const raw = atob(pendingDecryptSerial.replace("3DES-", ""));
+    
+    document.getElementById('d-step-1').style.color = '#64ffda';
+    let st1 = runFeistel16(raw, SYSTEM_KEY); 
+    await new Promise(r => setTimeout(r, 800));
+    
+    document.getElementById('d-step-2').style.color = '#64ffda';
+    let st2 = runFeistel16(st1, SYSTEM_KEY.split('').reverse().join('')); 
+    await new Promise(r => setTimeout(r, 800));
+
+    document.getElementById('d-step-3').style.color = '#64ffda';
+    let st3 = runFeistel16(st2, SYSTEM_KEY); 
+    await new Promise(r => setTimeout(r, 800));
+
+    const finalDecrypted = st3.trim();
+    document.getElementById('d-result').innerText = `[SUCCESS] Original Serial: ${finalDecrypted}`;
+    
+    addLog(`Manually Decrypted ${pendingDecryptItemName}`, "SUCCESS", "Admin");
+}
+
+// --- UTILS & RETURNS ---
 async function removeItem(id) {
     if(confirm("Delete this entire group of items?")) {
         const itemToDelete = vaultData.find(i => i._id === id); 
@@ -1384,10 +1523,27 @@ async function removeItem(id) {
     }
 }
 
+// --- UPDATED RETURN PROCESS LOGIC ---
+
 async function returnItem(id) {
+    if(!confirm("Mark this item as returned? The admin will need to physically verify it.")) return;
+    
+    let item = vaultData.find(i => i._id === id);
+    item.status = 'Pending Return';
+    
+    await fetch(`${API_URL}/items/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(item) });
+    addLog(`Requested return verification for ${item.equipment}`, "PENDING", item.borrower);
+    
+    const itemsRes = await fetch(`${API_URL}/items`);
+    vaultData = await itemsRes.json();
+    applyFilters();
+    alert("Return request sent! An admin will verify your equipment.");
+}
+
+async function confirmReturn(id) {
     let returnedItem = vaultData.find(i => i._id === id);
     
-    addLog(`Returned ${returnedItem.equipment}`, "SUCCESS", returnedItem.borrower);
+    addLog(`Verified and completed return: ${returnedItem.equipment}`, "SUCCESS", "Admin");
     
     const existingAvailableGroup = vaultData.find(i => i.equipment.toLowerCase() === returnedItem.equipment.toLowerCase() && i.status === 'Available' && i._id !== id);
 
@@ -1401,6 +1557,20 @@ async function returnItem(id) {
         await fetch(`${API_URL}/items/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(returnedItem) });
     }
 
+    const itemsRes = await fetch(`${API_URL}/items`);
+    vaultData = await itemsRes.json();
+    applyFilters();
+}
+
+async function rejectReturn(id) {
+    if(!confirm("Reject this return? The item will remain marked as Borrowed by the student.")) return;
+    
+    let item = vaultData.find(i => i._id === id);
+    item.status = 'Borrowed'; // Revert to borrowed
+    
+    await fetch(`${API_URL}/items/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(item) });
+    addLog(`Rejected return claim for ${item.equipment}`, "SECURITY ALERT", "Admin");
+    
     const itemsRes = await fetch(`${API_URL}/items`);
     vaultData = await itemsRes.json();
     applyFilters();
